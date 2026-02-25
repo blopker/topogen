@@ -2,6 +2,12 @@
 
 Generate topographic contour maps from Scaniverse 3D scan exports. Outputs top-down contour maps as PNG images or DXF files for import into CAD tools like Vectorworks.
 
+![Example topo map output](assets/topo_map_smooth3.png)
+
+```sh
+uv run python main.py scan.ply -o topo_map.png --smooth 3.0 --filter 3
+```
+
 ## Setup
 
 Requires [uv](https://docs.astral.sh/uv/).
