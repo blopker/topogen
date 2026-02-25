@@ -1,3 +1,7 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "topogen"
 version = "0.1.0"
@@ -5,9 +9,14 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "dearpygui>=2,<3",
     "ezdxf>=1.4.3,<2",
     "matplotlib>=3.10.8,<4",
     "numpy>=2.4.2,<3",
     "plyfile>=1.1.3,<2",
     "scipy>=1.17.1,<2",
 ]
+
+[project.scripts]
+topogen = "cli:main"
+topogen-gui = "gui:main"

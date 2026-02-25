@@ -4,7 +4,10 @@
       "Bash(head:*)",
       "Bash(python3:*)",
       "Bash(uv add:*)",
-      "Bash(uv run:*)"
+      "Bash(uv run:*)",
+      "mcp__kagi__kagi_search_fetch",
+      "WebFetch(domain:dearpygui.readthedocs.io)",
+      "Bash(uv sync:*)"
     ]
   }
 }
