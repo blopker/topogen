@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from topogen import (
+    compute_delaunay,
     compute_grid,
     compute_levels,
     export_dxf,
@@ -27,6 +28,8 @@ from topogen import (
 _state = {
     "points": None,          # raw (N,3) array from PLY
     "input_path": None,      # Path to loaded PLY
+    "precomputed": None,     # cached (tri, x_ft, y_ft, z_ft) from compute_delaunay
+    "last_filter": None,     # filter strength used for cached precomputed
     "xi_grid": None,
     "yi_grid": None,
     "zi_grid": None,
@@ -38,28 +41,28 @@ _state = {
 
 PREVIEW_W = 1600
 PREVIEW_H = 1600
-DEBOUNCE_SEC = 0.6
+DEBOUNCE_SEC = 0.2
 
 _debounce_lock = threading.Lock()
 _debounce_seq = 0  # incremented on every settings change
 
 
-def _fig_to_rgba(fig, width, height) -> array.array:
-    """Render a matplotlib Figure to a flat RGBA float array for DearPyGui."""
+def _fig_to_rgba(fig, width, height) -> np.ndarray:
+    """Render a matplotlib Figure to a flat RGBA float32 numpy array for DearPyGui."""
     fig.set_dpi(200)
     fig.set_size_inches(width / 200, height / 200)
     fig.canvas.draw()
-    buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
-    buf = buf.reshape((int(fig.get_figheight() * 200), int(fig.get_figwidth() * 200), 4))
+    buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(
+        int(fig.get_figheight() * 200), int(fig.get_figwidth() * 200), 4
+    )
     # Resize to exact target if needed
     if buf.shape[0] != height or buf.shape[1] != width:
         from PIL import Image
         img = Image.fromarray(buf)
         img = img.resize((width, height), Image.LANCZOS)
         buf = np.array(img)
-    # Normalize to 0-1 floats for DearPyGui
-    rgba = buf.astype(np.float32).ravel() / 255.0
-    return array.array("f", rgba)
+    # Normalize to 0-1 floats — stay in numpy (avoid slow array.array copy)
+    return np.ascontiguousarray(buf, dtype=np.float32).ravel() * (1.0 / 255.0)
 
 
 def _on_file_selected(sender, app_data):
@@ -125,7 +128,17 @@ def _do_generate():
         if filter_str > 0:
             points = filter_outliers(points, strength=filter_str)
 
-        xi, yi, zi, xr, yr = compute_grid(points, resolution, smooth)
+        # Reuse cached Delaunay triangulation when filter setting hasn't changed
+        precomputed = None
+        if _state["last_filter"] == filter_str and _state["precomputed"] is not None:
+            precomputed = _state["precomputed"]
+        else:
+            precomputed = compute_delaunay(points)
+            _state["precomputed"] = precomputed
+            _state["last_filter"] = filter_str
+
+        xi, yi, zi, xr, yr = compute_grid(points, resolution, smooth,
+                                           precomputed=precomputed)
         levels, index_levels = compute_levels(zi, interval)
 
         _state["xi_grid"] = xi

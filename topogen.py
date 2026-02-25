@@ -9,8 +9,9 @@ import numpy as np
 from matplotlib.colors import Normalize
 from matplotlib.figure import Figure
 from plyfile import PlyData
-from scipy.interpolate import griddata
+from scipy.interpolate import LinearNDInterpolator
 from scipy.ndimage import gaussian_filter
+from scipy.spatial import Delaunay
 
 M_PER_FT = 0.3048
 
@@ -80,21 +81,32 @@ def filter_outliers(
     y_bin = np.clip(np.digitize(y, y_edges) - 1, 0, bin_count - 1)
     bin_id = x_bin * bin_count + y_bin
 
-    keep = np.ones(len(points), dtype=bool)
-    for b in np.unique(bin_id):
-        mask = bin_id == b
-        zb = z[mask]
-        if len(zb) < 3:
+    # Sort by bin for cache-friendly access and single-pass processing
+    order = np.argsort(bin_id)
+    bin_id_sorted = bin_id[order]
+    z_sorted = z[order]
+
+    # Find boundaries between bins
+    changes = np.flatnonzero(np.diff(bin_id_sorted)) + 1
+    starts = np.concatenate([[0], changes])
+    ends = np.concatenate([changes, [len(z_sorted)]])
+
+    keep_sorted = np.ones(len(points), dtype=bool)
+    for s, e in zip(starts, ends):
+        if e - s < 3:
             continue
+        zb = z_sorted[s:e]
         median = np.median(zb)
         mad = np.median(np.abs(zb - median))
         if mad < 1e-9:
             mad = np.std(zb)
         if mad < 1e-9:
             continue
-        outlier = np.abs(zb - median) > strength * mad
-        idx = np.where(mask)[0]
-        keep[idx[outlier]] = False
+        keep_sorted[s:e] = np.abs(zb - median) <= strength * mad
+
+    # Map back to original order
+    keep = np.empty(len(points), dtype=bool)
+    keep[order] = keep_sorted
 
     n_removed = np.sum(~keep)
     print(
@@ -114,20 +126,42 @@ def load_ply(path: Path) -> np.ndarray:
     return np.column_stack([x, y, z])
 
 
-def compute_grid(points, grid_resolution, smooth):
-    """Interpolate point cloud onto a regular grid and apply smoothing.
+def compute_delaunay(points):
+    """Precompute Delaunay triangulation from points (in metres).
 
-    Returns xi_grid, yi_grid, zi_grid (all in feet), x_range, y_range.
+    Returns (tri, x_ft, y_ft, z_ft) where x/y are shifted so min=0.
+    The triangulation can be passed to ``compute_grid`` to avoid
+    recomputing it on every parameter change.
     """
     x, y, z = points[:, 0], points[:, 1], points[:, 2]
-
     x_ft = x / M_PER_FT
     y_ft = y / M_PER_FT
     z_ft = z / M_PER_FT
-
-    # Shift origin to (0, 0)
     x_ft -= x_ft.min()
     y_ft -= y_ft.min()
+    tri = Delaunay(np.column_stack([x_ft, y_ft]))
+    return tri, x_ft, y_ft, z_ft
+
+
+def compute_grid(points, grid_resolution, smooth, *, precomputed=None):
+    """Interpolate point cloud onto a regular grid and apply smoothing.
+
+    Args:
+        precomputed: Optional (tri, x_ft, y_ft, z_ft) from ``compute_delaunay``
+            to skip the expensive triangulation step.
+
+    Returns xi_grid, yi_grid, zi_grid (all in feet), x_range, y_range.
+    """
+    if precomputed is not None:
+        tri, x_ft, y_ft, z_ft = precomputed
+    else:
+        x, y, z = points[:, 0], points[:, 1], points[:, 2]
+        x_ft = x / M_PER_FT
+        y_ft = y / M_PER_FT
+        z_ft = z / M_PER_FT
+        x_ft -= x_ft.min()
+        y_ft -= y_ft.min()
+        tri = Delaunay(np.column_stack([x_ft, y_ft]))
 
     margin = 0.02
     x_range = x_ft.max() - x_ft.min()
@@ -141,9 +175,10 @@ def compute_grid(points, grid_resolution, smooth):
     xi_grid, yi_grid = np.meshgrid(xi, yi)
 
     print(
-        f"Interpolating {len(points)} points onto {grid_resolution}x{grid_resolution} grid..."
+        f"Interpolating {len(x_ft)} points onto {grid_resolution}x{grid_resolution} grid..."
     )
-    zi_grid = griddata((x_ft, y_ft), z_ft, (xi_grid, yi_grid), method="linear")
+    interp = LinearNDInterpolator(tri, z_ft)
+    zi_grid = interp(xi_grid, yi_grid)
 
     if smooth > 0:
         cell_size_ft = x_range / grid_resolution
@@ -183,15 +218,11 @@ def compute_levels(zi_grid, contour_interval_ft):
     return levels, index_levels
 
 
-def _extract_contours(xi_grid, yi_grid, zi_grid, levels, simplify_tolerance):
-    """Extract contour segments from the grid using matplotlib.
+def _simplify_contour_set(cs, simplify_tolerance):
+    """Simplify segments from a matplotlib ContourSet.
 
     Returns a list of (level_value, (N,2) vertices_array) tuples.
     """
-    fig_tmp, ax_tmp = plt.subplots()
-    cs = ax_tmp.contour(xi_grid, yi_grid, zi_grid, levels=levels)
-    plt.close(fig_tmp)
-
     contours = []
     total_before = 0
     total_after = 0
@@ -205,13 +236,24 @@ def _extract_contours(xi_grid, yi_grid, zi_grid, levels, simplify_tolerance):
             total_after += len(seg)
             contours.append((float(level_val), seg))
 
-    if simplify_tolerance > 0:
+    if simplify_tolerance > 0 and total_before > 0:
         print(
             f"Simplified contours: {total_before} → {total_after} vertices "
             f"({100 * (1 - total_after / total_before):.0f}% reduction, tolerance={simplify_tolerance:.1f} ft)"
         )
 
     return contours
+
+
+def _extract_contours(xi_grid, yi_grid, zi_grid, levels, simplify_tolerance):
+    """Extract contour segments from the grid using matplotlib.
+
+    Returns a list of (level_value, (N,2) vertices_array) tuples.
+    """
+    fig_tmp, ax_tmp = plt.subplots()
+    cs = ax_tmp.contour(xi_grid, yi_grid, zi_grid, levels=levels)
+    plt.close(fig_tmp)
+    return _simplify_contour_set(cs, simplify_tolerance)
 
 
 def export_dxf(
@@ -322,14 +364,12 @@ def render_to_figure(
     """
     z_min = np.nanmin(zi_grid)
     z_max = np.nanmax(zi_grid)
-
-    contours = _extract_contours(xi_grid, yi_grid, zi_grid, levels, simplify_tolerance)
     index_set = set(np.round(index_levels, 6))
 
     fig, ax = plt.subplots(1, 1, figsize=(14, 14), facecolor="white")
     ax.set_facecolor("white")
 
-    # Filled contours (not simplified — these are smooth fills)
+    # Filled contours
     norm = Normalize(vmin=z_min, vmax=z_max)
     cf = ax.contourf(
         xi_grid,
@@ -341,7 +381,11 @@ def render_to_figure(
         alpha=0.5,
     )
 
-    # Draw simplified contour lines manually
+    # Extract contour segments from the same axes (avoids a second contour computation)
+    cs = ax.contour(xi_grid, yi_grid, zi_grid, levels=levels, colors="none", linewidths=0)
+    contours = _simplify_contour_set(cs, simplify_tolerance)
+
+    # Draw simplified contour lines
     for level_val, seg in contours:
         level_rounded = round(level_val, 6)
         is_index = level_rounded in index_set
@@ -408,6 +452,14 @@ def render_png(
         y_range,
         simplify_tolerance=simplify_tolerance,
     )
-    fig.savefig(output_path, dpi=dpi, bbox_inches="tight", facecolor="white")
+    # Render to buffer, then quantize to 256-color palette for ~3.5x smaller PNGs
+    from io import BytesIO
+    from PIL import Image
+
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight", facecolor="white")
     plt.close(fig)
+    buf.seek(0)
+    img = Image.open(buf).convert("RGB").quantize(colors=256, method=2, dither=1)
+    img.save(output_path, optimize=True)
     print(f"Saved PNG to {output_path}")
