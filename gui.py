@@ -2,6 +2,8 @@
 """Desktop GUI for topogen — interactive topographic map generation using DearPyGui."""
 
 import array
+import threading
+import time
 from pathlib import Path
 
 import matplotlib
@@ -36,6 +38,10 @@ _state = {
 
 PREVIEW_W = 1600
 PREVIEW_H = 1600
+DEBOUNCE_SEC = 0.6
+
+_debounce_lock = threading.Lock()
+_debounce_seq = 0  # incremented on every settings change
 
 
 def _fig_to_rgba(fig, width, height) -> array.array:
@@ -74,14 +80,36 @@ def _on_file_selected(sender, app_data):
         _state["input_path"] = path
         dpg.set_value("file_label", path.name)
         dpg.set_value("status_text", f"Loaded {len(_state['points']):,} points from {path.name}")
+        _schedule_generate()
     except Exception as e:
         dpg.set_value("status_text", f"Error loading file: {e}")
 
 
-def _on_generate():
+def _on_setting_changed(sender=None, app_data=None, user_data=None):
+    """Called when any slider changes — debounces and regenerates."""
+    _schedule_generate()
+
+
+def _schedule_generate():
+    """Debounce: wait DEBOUNCE_SEC after the last change before generating."""
+    global _debounce_seq
+    with _debounce_lock:
+        _debounce_seq += 1
+        seq = _debounce_seq
+
+    def _worker():
+        time.sleep(DEBOUNCE_SEC)
+        with _debounce_lock:
+            if seq != _debounce_seq:
+                return  # a newer change superseded us
+        _do_generate()
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+def _do_generate():
     """Generate the topo map with current slider values."""
     if _state["points"] is None:
-        dpg.set_value("status_text", "No file loaded. Open a .ply file first.")
         return
 
     dpg.set_value("status_text", "Generating...")
@@ -209,7 +237,8 @@ def main():
                     dpg.add_text("Gaussian smoothing sigma. Higher values\nblur terrain more. 0 = off.", wrap=250)
                 dpg.add_slider_float(label="##smooth", tag="slider_smooth",
                                      default_value=1.0, min_value=0.0, max_value=5.0,
-                                     format="%.1f", width=-1)
+                                     format="%.1f", width=-1,
+                                     callback=_on_setting_changed)
 
                 dpg.add_text("Filter (MADs)")
                 with dpg.tooltip(dpg.last_item()):
@@ -218,7 +247,8 @@ def main():
                                  "0 = off. Try 2-5.", wrap=250)
                 dpg.add_slider_float(label="##filter", tag="slider_filter",
                                      default_value=0.0, min_value=0.0, max_value=10.0,
-                                     format="%.1f", width=-1)
+                                     format="%.1f", width=-1,
+                                     callback=_on_setting_changed)
 
                 dpg.add_text("Simplify (ft)")
                 with dpg.tooltip(dpg.last_item()):
@@ -227,7 +257,8 @@ def main():
                                  "0 = off. Try 0.3-1.0.", wrap=250)
                 dpg.add_slider_float(label="##simplify", tag="slider_simplify",
                                      default_value=0.0, min_value=0.0, max_value=2.0,
-                                     format="%.2f", width=-1)
+                                     format="%.2f", width=-1,
+                                     callback=_on_setting_changed)
 
                 dpg.add_text("Interval (ft)")
                 with dpg.tooltip(dpg.last_item()):
@@ -235,7 +266,8 @@ def main():
                                  "Smaller = more lines, more detail.", wrap=250)
                 dpg.add_slider_float(label="##interval", tag="slider_interval",
                                      default_value=1.0, min_value=0.5, max_value=5.0,
-                                     format="%.1f", width=-1)
+                                     format="%.1f", width=-1,
+                                     callback=_on_setting_changed)
 
                 dpg.add_text("Resolution")
                 with dpg.tooltip(dpg.last_item()):
@@ -243,10 +275,9 @@ def main():
                                  "Higher = finer detail but slower.", wrap=250)
                 dpg.add_slider_int(label="##resolution", tag="slider_resolution",
                                    default_value=500, min_value=100, max_value=1000,
-                                   width=-1)
+                                   width=-1,
+                                   callback=_on_setting_changed)
 
-                dpg.add_separator()
-                dpg.add_button(label="Generate", width=-1, callback=_on_generate)
                 dpg.add_separator()
 
                 dpg.add_button(label="Save PNG", width=-1,
