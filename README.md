@@ -4,6 +4,8 @@ Generate topographic contour maps from Scaniverse 3D scan exports. Outputs top-d
 
 ![Example topo map output](assets/topo_map_smooth3.png)
 
+![GUI screenshot](assets/screenshot.webp)
+
 ```sh
 uv run python cli.py scan.ply -o topo_map.png --smooth 3.0 --filter 3
 ```
